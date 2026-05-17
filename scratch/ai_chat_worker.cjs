@@ -13,11 +13,31 @@ require('dotenv').config({ path: '.env.local' });
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
 const SERVICE_KEY = process.env.VITE_SUPABASE_SERVICE_ROLE_KEY;
-const GEMINI_API_KEY = process.env.VITE_GEMINI_API_KEY;
+// Carrega uma lista de Chaves de API do Gemini para rodízio e custo zero
+const GEMINI_API_KEYS = [
+  process.env.VITE_GEMINI_API_KEY,
+  process.env.VITE_GEMINI_API_KEY_2,
+  process.env.VITE_GEMINI_API_KEY_3,
+  process.env.VITE_GEMINI_API_KEY_4
+].filter(Boolean);
 
-if (!SUPABASE_URL || !SERVICE_KEY || !GEMINI_API_KEY) {
-  console.error('❌ Erro: VITE_SUPABASE_URL, VITE_SUPABASE_SERVICE_ROLE_KEY ou VITE_GEMINI_API_KEY não configurados em .env.local');
+if (!SUPABASE_URL || !SERVICE_KEY || GEMINI_API_KEYS.length === 0) {
+  console.error('❌ Erro: VITE_SUPABASE_URL, VITE_SUPABASE_SERVICE_ROLE_KEY ou pelo menos uma VITE_GEMINI_API_KEY não configurada em .env.local');
   process.exit(1);
+}
+
+let currentKeyIndex = 0;
+
+// Retorna a chave ativa atual
+function getActiveApiKey() {
+  return GEMINI_API_KEYS[currentKeyIndex];
+}
+
+// Rotaciona para a próxima chave disponível
+function rotateApiKey() {
+  if (GEMINI_API_KEYS.length <= 1) return;
+  currentKeyIndex = (currentKeyIndex + 1) % GEMINI_API_KEYS.length;
+  console.log(`🔄 [API KEY ROTATION] Limite atingido. Alternando para a Chave de API de Backup #${currentKeyIndex + 1}`);
 }
 
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
@@ -188,7 +208,32 @@ async function processQueue() {
       // Forçamos o uso do gemini-flash-lite-latest para garantir a generosa cota gratuita robusta de 2026 (o flash padrão está limitado a 20 req/dia na chave gratuita)
       model = 'gemini-flash-lite-latest';
 
-      const geminiResult = await callGeminiAPI(GEMINI_API_KEY, promptHistory, personality, model);
+      let geminiResult = null;
+      let attempts = 0;
+      const maxKeyAttempts = GEMINI_API_KEYS.length;
+
+      while (attempts < maxKeyAttempts) {
+        try {
+          const currentKey = getActiveApiKey();
+          geminiResult = await callGeminiAPI(currentKey, promptHistory, personality, model);
+          break; // Sucesso, sai do loop de tentativas
+        } catch (apiErr) {
+          // Se for erro de cota esgotada (429 ou Quota Limit)
+          if (apiErr.message.includes('429') || apiErr.message.toLowerCase().includes('quota') || apiErr.message.toLowerCase().includes('limit')) {
+            console.warn(`⚠️ Chave de API #${currentKeyIndex + 1} esgotou a cota. Tentando rotacionar...`);
+            rotateApiKey();
+            attempts++;
+          } else {
+            // Outro erro de API (ex: prompt bloqueado por segurança), não adianta rotacionar chave
+            throw apiErr;
+          }
+        }
+      }
+
+      if (!geminiResult) {
+        throw new Error('Todas as chaves de API do Gemini no pool de rodízio falharam ou atingiram seus limites.');
+      }
+
       const responseText = geminiResult.text;
       console.log(`🤖 Resposta gerada para ${bot.name}: "${responseText.substring(0, 50)}..." [Tokens: ${geminiResult.totalTokens} (Prompt: ${geminiResult.promptTokens}, Completion: ${geminiResult.completionTokens})]`);
 
