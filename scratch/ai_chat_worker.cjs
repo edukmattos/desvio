@@ -63,8 +63,14 @@ ${personality}` }]
           try {
             const parsed = JSON.parse(data);
             const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+            const usage = parsed.usageMetadata || {};
             if (text) {
-              resolve(text.trim());
+              resolve({
+                text: text.trim(),
+                promptTokens: usage.promptTokenCount || 0,
+                completionTokens: usage.candidatesTokenCount || 0,
+                totalTokens: usage.totalTokenCount || 0
+              });
             } else {
               reject(new Error(`Resposta vazia ou inválida da API: ${data}`));
             }
@@ -182,8 +188,9 @@ async function processQueue() {
       // Forçamos o uso do gemini-flash-lite-latest para garantir a generosa cota gratuita robusta de 2026 (o flash padrão está limitado a 20 req/dia na chave gratuita)
       model = 'gemini-flash-lite-latest';
 
-      const responseText = await callGeminiAPI(GEMINI_API_KEY, promptHistory, personality, model);
-      console.log(`🤖 Resposta gerada para ${bot.name}: "${responseText.substring(0, 50)}..."`);
+      const geminiResult = await callGeminiAPI(GEMINI_API_KEY, promptHistory, personality, model);
+      const responseText = geminiResult.text;
+      console.log(`🤖 Resposta gerada para ${bot.name}: "${responseText.substring(0, 50)}..." [Tokens: ${geminiResult.totalTokens} (Prompt: ${geminiResult.promptTokens}, Completion: ${geminiResult.completionTokens})]`);
 
       // 7. Simula atraso realista de digitação baseado na extensão da resposta
       // Velocidade média: ~45ms por caractere + 500ms de tempo de pensamento
@@ -211,11 +218,14 @@ async function processQueue() {
         .update({ typing_user_id: null })
         .eq('id', msg.match_id);
 
-      // 10. Atualiza status na fila como concluído com sucesso
+      // 10. Atualiza status na fila como concluído com sucesso e salva contagem de tokens
       await supabase
         .from('ai_chat_queue')
         .update({
           status: 'completed',
+          prompt_tokens: geminiResult.promptTokens,
+          completion_tokens: geminiResult.completionTokens,
+          total_tokens: geminiResult.totalTokens,
           processed_at: new Date().toISOString()
         })
         .eq('id', item.id);
